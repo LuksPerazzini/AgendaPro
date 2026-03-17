@@ -46,6 +46,7 @@ function generateSlots(booked: string[], durationMin: number) {
 export default function BookingPage() {
   const { id } = useParams<{ id: string }>()
   const [searchParams] = useSearchParams()
+  const serviceParam = searchParams.get('service')
 
   const [pro, setPro] = useState<Profile | null>(null)
   const [services, setServices] = useState<Service[]>([])
@@ -55,7 +56,7 @@ export default function BookingPage() {
   const [error, setError] = useState('')
 
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1)
-  const [selectedServiceId, setSelectedServiceId] = useState(searchParams.get('service') || '')
+  const [selectedServiceId, setSelectedServiceId] = useState(serviceParam || '')
   const [selectedDate, setSelectedDate] = useState('')
   const [selectedTime, setSelectedTime] = useState('')
   const [clientName, setClientName] = useState('')
@@ -97,15 +98,15 @@ export default function BookingPage() {
           .eq('active', true)
           .order('price')
         setServices(svcData as Service[] ?? [])
-        if (searchParams.get('service') && svcData) {
-          const match = (svcData as Service[]).find(s => s.id === searchParams.get('service'))
+        if (serviceParam && svcData) {
+          const match = (svcData as Service[]).find(s => s.id === serviceParam)
           if (match) setSelectedServiceId(match.id)
         }
       }
       setLoadingPro(false)
     }
     load()
-  }, [id])
+  }, [id, serviceParam])
 
   // Fetch booked times when date changes
   useEffect(() => {

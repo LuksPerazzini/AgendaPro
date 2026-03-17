@@ -52,7 +52,7 @@ export default function ProfessionalProfile() {
       setLoading(true)
 
       // Try slug first, then by id
-      let query = supabase
+      const query = supabase
         .from('profiles')
         .select('id, full_name, profession, bio, city, state, phone, avatar_url, cover_url, rating, review_count, slug, plan')
 

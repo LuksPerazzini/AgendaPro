@@ -33,21 +33,31 @@ export default function DashboardConfiguracoes() {
 
   useEffect(() => {
     if (!user || !profile) return
-    setForm({
-      full_name: profile.full_name ?? '',
-      profession: profile.profession ?? '',
-      bio: '',
-      phone: '',
-      city: '',
-      state: '',
-    })
+    let ignore = false
+
     const loadExtra = async () => {
-      const { data: profileData } = await supabase.from('profiles').select('bio, phone, city, state').eq('id', user.id).single()
-      if (profileData) setForm(f => ({ ...f, ...profileData }))
-      const { data: svcs } = await supabase.from('services').select('*').eq('profile_id', user.id).eq('active', true)
-      if (svcs) setServices(svcs as Service[])
+      const [{ data: profileData }, { data: svcs }] = await Promise.all([
+        supabase.from('profiles').select('bio, phone, city, state').eq('id', user.id).single(),
+        supabase.from('services').select('*').eq('profile_id', user.id).eq('active', true),
+      ])
+
+      if (ignore) return
+
+      setForm({
+        full_name: profile.full_name ?? '',
+        profession: profile.profession ?? '',
+        bio: profileData?.bio ?? '',
+        phone: profileData?.phone ?? '',
+        city: profileData?.city ?? '',
+        state: profileData?.state ?? '',
+      })
+      setServices((svcs as Service[] | null) ?? [])
     }
-    loadExtra()
+    void loadExtra()
+
+    return () => {
+      ignore = true
+    }
   }, [user, profile])
 
   const saveProfile = async () => {
