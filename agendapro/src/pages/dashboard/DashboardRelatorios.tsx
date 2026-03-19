@@ -1,17 +1,18 @@
-import { useEffect, useState } from 'react'
+﻿import { useEffect, useState } from 'react'
 import { TrendingUp, DollarSign, Users, Calendar, ArrowUp, ArrowDown, Loader2 } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { useAuth } from '../../contexts/AuthContext'
 
 type MonthStat = { month: string; revenue: number; bookings: number }
 type ServiceStat = { name: string; bookings: number; revenue: number }
+type AppointmentRow = { status: string; date: string; services: { name: string; price: number }[] | null }
 
 export default function DashboardRelatorios() {
   const { user } = useAuth()
   const [loading, setLoading] = useState(true)
   const [total, setTotal] = useState(0)
   const [confirmed, setConfirmed] = useState(0)
-  const [cancelled, setCancelled] = useState(0)
+  const [completed, setCompleted] = useState(0)
   const [revenue, setRevenue] = useState(0)
   const [monthlyStats, setMonthlyStats] = useState<MonthStat[]>([])
   const [topServices, setTopServices] = useState<ServiceStat[]>([])
@@ -30,39 +31,41 @@ export default function DashboardRelatorios() {
         .eq('profile_id', user.id)
         .gte('date', sixMonthsAgo.toISOString().slice(0, 10))
 
-      if (!data) { setLoading(false); return }
+      if (!data) {
+        setLoading(false)
+        return
+      }
 
-      const rows = data as { status: string; date: string; services: { name: string; price: number }[] | null }[]
+      const rows = data as AppointmentRow[]
+      const completedRows = rows.filter(row => row.status === 'completed')
 
       setTotal(rows.length)
-      setConfirmed(rows.filter(r => r.status === 'confirmed' || r.status === 'completed').length)
-      setCancelled(rows.filter(r => r.status === 'cancelled').length)
-      const rev = rows.filter(r => r.status !== 'cancelled').reduce((s, r) => s + (r.services?.[0]?.price ?? 0), 0)
-      setRevenue(rev)
+      setConfirmed(rows.filter(row => row.status === 'confirmed' || row.status === 'completed').length)
+      setCompleted(completedRows.length)
+      setRevenue(completedRows.reduce((sum, row) => sum + (row.services?.[0]?.price ?? 0), 0))
 
       const monthMap = new Map<string, MonthStat>()
-      for (const row of rows) {
-        if (row.status === 'cancelled') continue
+      for (const row of completedRows) {
         const key = row.date.slice(0, 7)
         if (!monthMap.has(key)) monthMap.set(key, { month: key, revenue: 0, bookings: 0 })
-        const m = monthMap.get(key)!
-        m.bookings++
-        m.revenue += row.services?.[0]?.price ?? 0
+        const month = monthMap.get(key)
+        if (!month) continue
+        month.bookings += 1
+        month.revenue += row.services?.[0]?.price ?? 0
       }
-      const sorted = Array.from(monthMap.values()).sort((a, b) => a.month.localeCompare(b.month))
-      setMonthlyStats(sorted)
+      setMonthlyStats(Array.from(monthMap.values()).sort((a, b) => a.month.localeCompare(b.month)))
 
-      const svcMap = new Map<string, ServiceStat>()
-      for (const row of rows) {
-        if (row.status === 'cancelled' || !row.services?.[0]) continue
-        const name = row.services[0].name
-        const price = row.services[0].price
-        if (!svcMap.has(name)) svcMap.set(name, { name, bookings: 0, revenue: 0 })
-        const s = svcMap.get(name)!
-        s.bookings++
-        s.revenue += price
+      const serviceMap = new Map<string, ServiceStat>()
+      for (const row of completedRows) {
+        if (!row.services?.[0]) continue
+        const { name, price } = row.services[0]
+        if (!serviceMap.has(name)) serviceMap.set(name, { name, bookings: 0, revenue: 0 })
+        const service = serviceMap.get(name)
+        if (!service) continue
+        service.bookings += 1
+        service.revenue += price
       }
-      setTopServices(Array.from(svcMap.values()).sort((a, b) => b.bookings - a.bookings).slice(0, 5))
+      setTopServices(Array.from(serviceMap.values()).sort((a, b) => b.bookings - a.bookings).slice(0, 5))
 
       setLoading(false)
     }
@@ -70,20 +73,19 @@ export default function DashboardRelatorios() {
   }, [user])
 
   const confirmRate = total > 0 ? Math.round((confirmed / total) * 100) : 0
-  const cancelRate = total > 0 ? Math.round((cancelled / total) * 100) : 0
-  const maxRevenue = Math.max(...monthlyStats.map(m => m.revenue), 1)
-  const maxBookings = Math.max(...topServices.map(s => s.bookings), 1)
+  const maxRevenue = Math.max(...monthlyStats.map(stat => stat.revenue), 1)
+  const maxBookings = Math.max(...topServices.map(service => service.bookings), 1)
 
   const monthName = (key: string) => {
-    const [y, m] = key.split('-')
-    return new Date(+y, +m - 1).toLocaleDateString('pt-BR', { month: 'short' })
+    const [year, month] = key.split('-')
+    return new Date(+year, +month - 1).toLocaleDateString('pt-BR', { month: 'short' })
   }
 
   return (
     <div className="p-4 sm:p-6 lg:p-8">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-slate-900">Relatórios</h1>
-        <p className="text-slate-500 text-sm mt-0.5">Análise de desempenho do seu negócio</p>
+        <p className="mt-0.5 text-sm text-slate-500">Analise de desempenho do seu negocio</p>
       </div>
 
       {loading ? (
@@ -92,66 +94,69 @@ export default function DashboardRelatorios() {
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+          <div className="mb-3 rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+            O faturamento considera apenas atendimentos concluidos para evitar inflar a receita com agendamentos ainda pendentes.
+          </div>
+
+          <div className="mb-8 grid grid-cols-2 gap-4 lg:grid-cols-4">
             {[
               { label: 'Faturamento total', value: `R$${revenue.toLocaleString('pt-BR')}`, icon: <DollarSign size={18} className="text-emerald-600" />, bg: 'bg-emerald-50', up: true },
               { label: 'Total agendamentos', value: total, icon: <Calendar size={18} className="text-indigo-600" />, bg: 'bg-indigo-50', up: true },
-              { label: 'Taxa de confirmação', value: `${confirmRate}%`, icon: <TrendingUp size={18} className="text-purple-600" />, bg: 'bg-purple-50', up: true },
-              { label: 'Taxa de cancelamento', value: `${cancelRate}%`, icon: <Users size={18} className="text-rose-500" />, bg: 'bg-rose-50', up: false },
+      { label: 'Taxa de confirmação', value: `${confirmRate}%`, icon: <TrendingUp size={18} className="text-purple-600" />, bg: 'bg-purple-50', up: true },
+              { label: 'Atendimentos concluidos', value: completed, icon: <Users size={18} className="text-rose-500" />, bg: 'bg-rose-50', up: completed > 0 },
             ].map(kpi => (
-              <div key={kpi.label} className="bg-white rounded-2xl p-5 border border-slate-100">
-                <div className={`w-10 h-10 ${kpi.bg} rounded-xl flex items-center justify-center mb-3`}>{kpi.icon}</div>
+              <div key={kpi.label} className="rounded-2xl border border-slate-100 bg-white p-5">
+                <div className={`mb-3 flex h-10 w-10 items-center justify-center rounded-xl ${kpi.bg}`}>{kpi.icon}</div>
                 <div className="text-2xl font-bold text-slate-900">{kpi.value}</div>
-                <div className="text-xs text-slate-500 mt-0.5">{kpi.label}</div>
-                <div className={`flex items-center gap-0.5 text-xs mt-1.5 font-medium ${kpi.up ? 'text-emerald-600' : 'text-slate-400'}`}>
+                <div className="mt-0.5 text-xs text-slate-500">{kpi.label}</div>
+                <div className={`mt-1.5 flex items-center gap-0.5 text-xs font-medium ${kpi.up ? 'text-emerald-600' : 'text-slate-400'}`}>
                   {kpi.up ? <ArrowUp size={10} /> : <ArrowDown size={10} />}
-                  últimos 6 meses
+                  ultimos 6 meses
                 </div>
               </div>
             ))}
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div className="bg-white rounded-2xl border border-slate-100 p-6">
-              <h3 className="font-bold text-slate-900 mb-1">Receita mensal</h3>
-              <p className="text-sm text-slate-500 mb-5">Faturamento por mês</p>
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <div className="rounded-2xl border border-slate-100 bg-white p-6">
+              <h3 className="mb-1 font-bold text-slate-900">Receita mensal</h3>
+            <p className="mb-5 text-sm text-slate-500">Faturamento por mês concluído</p>
               {monthlyStats.length === 0 ? (
-                <div className="h-40 flex items-center justify-center text-slate-400 text-sm">Ainda sem dados suficientes</div>
+                <div className="flex h-40 items-center justify-center text-sm text-slate-400">Ainda sem dados suficientes</div>
               ) : (
-                <div className="flex items-end gap-2 h-40">
-                  {monthlyStats.map(m => (
-                    <div key={m.month} className="flex-1 flex flex-col items-center gap-1">
-                      <div className="text-xs font-medium text-slate-700">R${m.revenue}</div>
-                      <div className="w-full bg-indigo-500 rounded-t-md hover:bg-indigo-600 transition-colors"
-                        style={{ height: `${(m.revenue / maxRevenue) * 100}%`, minHeight: '4px' }} />
-                      <div className="text-xs text-slate-400">{monthName(m.month)}</div>
+                <div className="flex h-40 items-end gap-2">
+                  {monthlyStats.map(stat => (
+                    <div key={stat.month} className="flex flex-1 flex-col items-center gap-1">
+                      <div className="text-xs font-medium text-slate-700">R${stat.revenue}</div>
+                      <div className="w-full rounded-t-md bg-indigo-500 transition-colors hover:bg-indigo-600" style={{ height: `${(stat.revenue / maxRevenue) * 100}%`, minHeight: '4px' }} />
+                      <div className="text-xs text-slate-400">{monthName(stat.month)}</div>
                     </div>
                   ))}
                 </div>
               )}
             </div>
 
-            <div className="bg-white rounded-2xl border border-slate-100 p-6">
-              <h3 className="font-bold text-slate-900 mb-1">Serviços mais populares</h3>
-              <p className="text-sm text-slate-500 mb-5">Ranking por número de agendamentos</p>
+            <div className="rounded-2xl border border-slate-100 bg-white p-6">
+            <h3 className="mb-1 font-bold text-slate-900">Serviços mais rentáveis</h3>
+              <p className="mb-5 text-sm text-slate-500">Ranking baseado em atendimentos concluidos</p>
               {topServices.length === 0 ? (
-                <div className="flex items-center justify-center py-10 text-slate-400 text-sm">Nenhum agendamento ainda</div>
+                <div className="flex items-center justify-center py-10 text-sm text-slate-400">Nenhum atendimento concluido ainda</div>
               ) : (
                 <div className="space-y-4">
-                  {topServices.map((s, i) => (
-                    <div key={s.name}>
-                      <div className="flex items-center justify-between text-sm mb-1.5">
+                  {topServices.map((service, index) => (
+                    <div key={service.name}>
+                      <div className="mb-1.5 flex items-center justify-between text-sm">
                         <div className="flex items-center gap-2">
-                          <span className="text-xs font-bold text-slate-400 w-5">#{i + 1}</span>
-                          <span className="font-medium text-slate-800">{s.name}</span>
+                          <span className="w-5 text-xs font-bold text-slate-400">#{index + 1}</span>
+                          <span className="font-medium text-slate-800">{service.name}</span>
                         </div>
                         <div className="flex items-center gap-3">
-                          <span className="text-slate-500">{s.bookings} agend.</span>
-                          <span className="text-emerald-600 font-semibold">R${s.revenue}</span>
+                          <span className="text-slate-500">{service.bookings} concl.</span>
+                          <span className="font-semibold text-emerald-600">R${service.revenue}</span>
                         </div>
                       </div>
-                      <div className="w-full bg-slate-100 rounded-full h-2">
-                        <div className="bg-indigo-500 h-2 rounded-full" style={{ width: `${(s.bookings / maxBookings) * 100}%` }} />
+                      <div className="h-2 w-full rounded-full bg-slate-100">
+                        <div className="h-2 rounded-full bg-indigo-500" style={{ width: `${(service.bookings / maxBookings) * 100}%` }} />
                       </div>
                     </div>
                   ))}
@@ -160,20 +165,20 @@ export default function DashboardRelatorios() {
             </div>
 
             {monthlyStats.length > 0 && (
-              <div className="bg-white rounded-2xl border border-slate-100 p-6 lg:col-span-2">
-                <h3 className="font-bold text-slate-900 mb-1">Evolução mensal</h3>
-                <p className="text-sm text-slate-500 mb-5">Crescimento dos últimos meses</p>
-                <div className={`grid gap-3`} style={{ gridTemplateColumns: `repeat(${monthlyStats.length}, 1fr)` }}>
-                  {monthlyStats.map((m, i) => {
-                    const growth = i > 0 && monthlyStats[i - 1].revenue > 0
-                      ? ((m.revenue - monthlyStats[i - 1].revenue) / monthlyStats[i - 1].revenue * 100).toFixed(1)
+              <div className="rounded-2xl border border-slate-100 bg-white p-6 lg:col-span-2">
+                <h3 className="mb-1 font-bold text-slate-900">Evolucao mensal</h3>
+                <p className="mb-5 text-sm text-slate-500">Crescimento de receita nos ultimos meses</p>
+                <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${monthlyStats.length}, 1fr)` }}>
+                  {monthlyStats.map((stat, index) => {
+                    const growth = index > 0 && monthlyStats[index - 1].revenue > 0
+                      ? ((stat.revenue - monthlyStats[index - 1].revenue) / monthlyStats[index - 1].revenue * 100).toFixed(1)
                       : null
                     return (
-                      <div key={m.month} className="bg-slate-50 rounded-xl p-3 text-center">
-                        <div className="text-xs font-medium text-slate-400 mb-1">{monthName(m.month)}</div>
-                        <div className="text-base font-bold text-slate-900">R${m.revenue > 999 ? (m.revenue / 1000).toFixed(1) + 'k' : m.revenue}</div>
-                        <div className="text-xs text-slate-500">{m.bookings} agend.</div>
-                        {growth && <div className="text-xs text-emerald-600 font-medium mt-1">+{growth}%</div>}
+                      <div key={stat.month} className="rounded-xl bg-slate-50 p-3 text-center">
+                        <div className="mb-1 text-xs font-medium text-slate-400">{monthName(stat.month)}</div>
+                        <div className="text-base font-bold text-slate-900">R${stat.revenue > 999 ? `${(stat.revenue / 1000).toFixed(1)}k` : stat.revenue}</div>
+                        <div className="text-xs text-slate-500">{stat.bookings} concl.</div>
+                        {growth && <div className="mt-1 text-xs font-medium text-emerald-600">+{growth}%</div>}
                       </div>
                     )
                   })}
@@ -186,3 +191,5 @@ export default function DashboardRelatorios() {
     </div>
   )
 }
+
+

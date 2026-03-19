@@ -1,8 +1,11 @@
-import { useState, useEffect } from 'react'
+﻿import { useState, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { Search, MapPin, Users, SlidersHorizontal, X, Star, Loader2 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { categories } from '../data/mockData'
+
+const highlightedCategories = categories
+const marketplaceCategories = [...highlightedCategories, { id: 'outros', name: 'Outros', icon: '🧰', count: 0 }]
 
 type Pro = {
   id: string
@@ -18,6 +21,21 @@ type Pro = {
   slug: string
   plan: string
   min_price: number | null
+  active_services: number
+}
+
+const planPriority: Record<string, number> = {
+  business: 2,
+  pro: 1,
+  free: 0,
+}
+
+function getPlanPriority(plan: string) {
+  return planPriority[plan] ?? 0
+}
+
+function getPrimaryProfessionName(profession: string) {
+  return profession.split(' - ')[0].trim().toLowerCase()
 }
 
 export default function Marketplace() {
@@ -32,68 +50,93 @@ export default function Marketplace() {
   useEffect(() => {
     const load = async () => {
       setLoading(true)
-      // Fetch profiles + min price from services
+
       const { data: profilesData } = await supabase
-        .from('profiles')
+        .from('public_profiles')
         .select('id, full_name, profession, bio, city, state, avatar_url, cover_url, rating, review_count, slug, plan')
         .order('rating', { ascending: false })
 
-      if (!profilesData) { setLoading(false); return }
+      if (!profilesData) {
+        setLoading(false)
+        return
+      }
 
-      // Fetch min prices per profile
       const { data: pricesData } = await supabase
         .from('services')
         .select('profile_id, price')
         .eq('active', true)
 
       const priceMap = new Map<string, number>()
+      const activeServiceCountMap = new Map<string, number>()
       if (pricesData) {
         for (const row of pricesData as { profile_id: string; price: number }[]) {
-          const cur = priceMap.get(row.profile_id)
-          if (cur === undefined || row.price < cur) priceMap.set(row.profile_id, row.price)
+          const currentValue = priceMap.get(row.profile_id)
+          if (currentValue === undefined || row.price < currentValue) {
+            priceMap.set(row.profile_id, row.price)
+          }
+          activeServiceCountMap.set(row.profile_id, (activeServiceCountMap.get(row.profile_id) ?? 0) + 1)
         }
       }
 
-      setPros(profilesData.map(p => ({ ...p, min_price: priceMap.get(p.id) ?? null })) as Pro[])
+      setPros(
+        profilesData
+          .map(profile => ({
+            ...profile,
+            min_price: priceMap.get(profile.id) ?? null,
+            active_services: activeServiceCountMap.get(profile.id) ?? 0,
+          }))
+          .filter(profile => profile.active_services > 0) as Pro[],
+      )
       setLoading(false)
     }
-    load()
+
+    void load()
   }, [])
 
-  const cities = [...new Set(pros.map(p => p.city).filter(Boolean))] as string[]
+  const cities = useMemo(() => [...new Set(pros.map(pro => pro.city).filter(Boolean))] as string[], [pros])
 
-  const filtered = pros
-    .filter(p => {
+  const filtered = useMemo(() => pros
+    .filter(pro => {
+      const normalizedSearch = search.toLowerCase()
       const matchSearch = !search ||
-        p.full_name.toLowerCase().includes(search.toLowerCase()) ||
-        p.profession.toLowerCase().includes(search.toLowerCase())
-      const matchCat = !selectedCategory ||
-        categories.find(c => c.id === selectedCategory)?.name.toLowerCase() === p.profession.toLowerCase()
-      const matchCity = !selectedCity || p.city === selectedCity
-      return matchSearch && matchCat && matchCity
+        pro.full_name.toLowerCase().includes(normalizedSearch) ||
+        pro.profession.toLowerCase().includes(normalizedSearch)
+      const primaryProfessionName = getPrimaryProfessionName(pro.profession)
+      const matchCategory = !selectedCategory || (
+        selectedCategory === 'outros'
+          ? !highlightedCategories.some(category => category.name.toLowerCase() === primaryProfessionName)
+          : highlightedCategories.find(category => category.id === selectedCategory)?.name.toLowerCase() === primaryProfessionName
+      )
+      const matchCity = !selectedCity || pro.city === selectedCity
+      return matchSearch && matchCategory && matchCity
     })
-    .sort((a, b) => {
-      if (sortBy === 'rating') return (b.rating ?? 0) - (a.rating ?? 0)
-      if (sortBy === 'reviews') return (b.review_count ?? 0) - (a.review_count ?? 0)
+    .sort((first, second) => {
+      const planDiff = getPlanPriority(second.plan) - getPlanPriority(first.plan)
+      if (planDiff !== 0) return planDiff
+      if (sortBy === 'rating') return (second.rating ?? 0) - (first.rating ?? 0)
+      if (sortBy === 'reviews') return (second.review_count ?? 0) - (first.review_count ?? 0)
       return 0
-    })
+    }), [pros, search, selectedCategory, selectedCity, sortBy])
 
   return (
-    <div className="min-h-screen w-full bg-slate-50">
-      <div className="bg-gradient-to-r from-indigo-600 to-purple-700 py-12">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <h1 className="text-3xl font-bold text-white mb-2">Encontre Profissionais</h1>
-          <p className="text-indigo-100 mb-6">Agende serviços com os melhores profissionais da sua região</p>
-          <div className="flex gap-3 max-w-2xl">
-            <div className="flex-1 bg-white rounded-xl flex items-center px-4 gap-3 shadow-lg">
+    <div className="page-enter min-h-screen w-full bg-transparent">
+      <div className="relative overflow-hidden bg-gradient-to-r from-indigo-600 via-indigo-500 to-sky-500 py-12">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <h1 className="mb-2 text-3xl font-bold text-white">Encontre profissionais</h1>
+          <p className="mb-6 text-indigo-100">Descubra profissionais da sua região e agende online em poucos passos.</p>
+          <div className="flex max-w-2xl gap-3">
+            <div className="flex flex-1 items-center gap-3 rounded-xl bg-white px-4 shadow-lg">
               <Search size={18} className="text-slate-400" />
-              <input type="text" placeholder="Buscar profissional ou serviço..."
-                className="flex-1 py-3.5 outline-none text-slate-700 placeholder-slate-400"
-                value={search} onChange={e => setSearch(e.target.value)} />
+              <input
+                type="text"
+                placeholder="Buscar profissional ou serviço..."
+                className="flex-1 py-3.5 text-slate-700 outline-none placeholder:text-slate-400"
+                value={search}
+                onChange={event => setSearch(event.target.value)}
+              />
               {search && <button onClick={() => setSearch('')}><X size={16} className="text-slate-400" /></button>}
             </div>
-            <button onClick={() => setShowFilters(!showFilters)}
-              className="bg-white text-indigo-600 px-4 py-3.5 rounded-xl font-medium flex items-center gap-2 shadow-lg hover:bg-indigo-50 transition-colors">
+            <button onClick={() => setShowFilters(!showFilters)} className="flex items-center gap-2 rounded-xl bg-white px-4 py-3.5 font-medium text-indigo-600 shadow-lg transition-colors hover:bg-indigo-50">
               <SlidersHorizontal size={16} />
               <span className="hidden sm:inline">Filtros</span>
             </button>
@@ -101,41 +144,38 @@ export default function Marketplace() {
         </div>
       </div>
 
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="flex gap-2 flex-wrap mb-6">
-          <button onClick={() => setSelectedCategory('')}
-            className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${!selectedCategory ? 'bg-indigo-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:border-indigo-300'}`}>
+      <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+        <div className="mb-6 flex flex-wrap gap-2">
+          <button onClick={() => setSelectedCategory('')} className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${!selectedCategory ? 'bg-indigo-600 text-white' : 'border border-slate-200 bg-white text-slate-600 hover:border-indigo-300'}`}>
             Todos
           </button>
-          {categories.map(cat => (
-            <button key={cat.id} onClick={() => setSelectedCategory(cat.id === selectedCategory ? '' : cat.id)}
-              className={`px-4 py-2 rounded-full text-sm font-medium transition-colors flex items-center gap-1.5 ${selectedCategory === cat.id ? 'bg-indigo-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:border-indigo-300'}`}>
-              <span>{cat.icon}</span> {cat.name}
+          {marketplaceCategories.map(category => (
+            <button key={category.id} onClick={() => setSelectedCategory(category.id === selectedCategory ? '' : category.id)} className={`flex items-center gap-1.5 rounded-full px-4 py-2 text-sm font-medium transition-colors ${selectedCategory === category.id ? 'bg-indigo-600 text-white' : 'border border-slate-200 bg-white text-slate-600 hover:border-indigo-300'}`}>
+              <span>{category.icon}</span> {category.name}
             </button>
           ))}
         </div>
 
         {showFilters && (
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 mb-6 grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="public-panel mb-6 grid grid-cols-1 gap-4 rounded-2xl p-5 sm:grid-cols-3">
             <div>
-              <label className="text-sm font-medium text-slate-700 mb-1.5 block">Cidade</label>
-              <select value={selectedCity} onChange={e => setSelectedCity(e.target.value)}
-                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-400">
+              <label className="mb-1.5 block text-sm font-medium text-slate-700">Cidade</label>
+              <select value={selectedCity} onChange={event => setSelectedCity(event.target.value)} className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-400">
                 <option value="">Todas as cidades</option>
-                {cities.map(c => <option key={c} value={c}>{c}</option>)}
+                {cities.map(city => <option key={city} value={city}>{city}</option>)}
               </select>
             </div>
             <div>
-              <label className="text-sm font-medium text-slate-700 mb-1.5 block">Ordenar por</label>
-              <select value={sortBy} onChange={e => setSortBy(e.target.value)}
-                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-400">
+              <label className="mb-1.5 block text-sm font-medium text-slate-700">Ordenar por</label>
+              <select value={sortBy} onChange={event => setSortBy(event.target.value)} className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-400">
                 <option value="rating">Melhor avaliação</option>
                 <option value="reviews">Mais avaliações</option>
               </select>
             </div>
             <div className="flex items-end">
-              <button onClick={() => { setSelectedCity(''); setSelectedCategory(''); setSearch('') }}
-                className="text-sm text-indigo-600 hover:underline">Limpar filtros</button>
+              <button onClick={() => { setSelectedCity(''); setSelectedCategory(''); setSearch('') }} className="text-sm text-indigo-600 hover:underline">
+                Limpar filtros
+              </button>
             </div>
           </div>
         )}
@@ -146,64 +186,110 @@ export default function Marketplace() {
           </div>
         ) : (
           <>
-            <div className="flex items-center justify-between mb-5">
-              <p className="text-slate-600 text-sm">{filtered.length} profissional{filtered.length !== 1 ? 'is' : ''} encontrado{filtered.length !== 1 ? 's' : ''}</p>
+            <div className="mb-5 flex items-center justify-between">
+              <p className="text-sm text-slate-600">{filtered.length} profissional{filtered.length !== 1 ? 's' : ''} encontrado{filtered.length !== 1 ? 's' : ''}</p>
             </div>
 
             {filtered.length === 0 ? (
-              <div className="text-center py-20 text-slate-500">
+              <div className="py-20 text-center text-slate-500">
                 <Search size={48} className="mx-auto mb-4 text-slate-300" />
                 <p className="text-lg font-medium">Nenhum profissional encontrado</p>
-                <p className="text-sm mt-1">Tente outros filtros ou seja o primeiro da sua categoria!</p>
-                <Link to="/register" className="mt-4 inline-block bg-indigo-600 text-white px-6 py-2.5 rounded-xl text-sm font-bold hover:bg-indigo-700 transition-colors">
+                <p className="mt-1 text-sm">Tente outros filtros ou seja o primeiro da sua categoria.</p>
+                <Link to="/register" className="mt-4 inline-block rounded-xl bg-indigo-600 px-6 py-2.5 text-sm font-bold text-white transition-colors hover:bg-indigo-700">
                   Cadastrar meu negócio
                 </Link>
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
                 {filtered.map(pro => (
-                  <Link key={pro.id} to={`/professional/${pro.slug}`}
-                    className="bg-white rounded-2xl shadow-sm hover:shadow-md transition-all border border-slate-100 overflow-hidden group">
-                    <div className="relative h-36 overflow-hidden bg-gradient-to-br from-indigo-100 to-purple-100">
+                  <Link
+                    key={pro.id}
+                    to={`/professional/${pro.slug}`}
+                    className={`public-panel group overflow-hidden rounded-3xl border transition-all duration-300 hover:-translate-y-1 ${
+                      pro.plan === 'business'
+                        ? 'border-slate-900/10 shadow-[0_30px_65px_-38px_rgba(15,23,42,0.4)] hover:shadow-[0_34px_75px_-40px_rgba(15,23,42,0.45)]'
+                        : pro.plan === 'pro'
+                          ? 'border-amber-200/70 shadow-[0_28px_60px_-36px_rgba(79,70,229,0.45)]'
+                          : 'border-slate-100 hover:shadow-[0_28px_60px_-36px_rgba(79,70,229,0.2)]'
+                    }`}
+                  >
+                    <div className={`relative h-44 overflow-hidden ${
+                      pro.plan === 'business'
+                        ? 'bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-900'
+                        : pro.plan === 'pro'
+                          ? 'bg-gradient-to-br from-amber-100 via-indigo-100 to-purple-100'
+                          : 'bg-gradient-to-br from-indigo-100 via-sky-50 to-purple-100'
+                    }`}>
                       {pro.cover_url ? (
-                        <img src={pro.cover_url} alt={pro.full_name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                        <img src={pro.cover_url} alt={pro.full_name} className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105" />
                       ) : (
-                        <div className="w-full h-full flex items-center justify-center text-indigo-300">
+                        <div className={`flex h-full w-full items-center justify-center ${
+                          pro.plan === 'business' ? 'text-white/35' : 'text-indigo-300'
+                        }`}>
                           <Users size={40} />
                         </div>
                       )}
+                      <div className="absolute inset-0 bg-gradient-to-t from-slate-950/25 via-transparent to-transparent" />
+                      {pro.plan === 'business' && (
+                        <span className="absolute right-3 top-3 rounded-full bg-white px-2.5 py-1 text-xs font-bold text-slate-900">
+                          BUSINESS
+                        </span>
+                      )}
                       {pro.plan === 'pro' && (
-                        <span className="absolute top-3 right-3 bg-amber-400 text-amber-900 text-xs font-bold px-2 py-1 rounded-full">PRO</span>
+                        <span className="absolute right-3 top-3 rounded-full bg-amber-400 px-2.5 py-1 text-xs font-bold text-amber-900">
+                          PRO
+                        </span>
+                      )}
+                      {pro.plan !== 'free' && (
+                        <div className="absolute bottom-3 left-3 rounded-full bg-black/25 px-2.5 py-1 text-[11px] font-semibold text-white backdrop-blur-sm">
+                          {pro.plan === 'business' ? 'Destaque premium' : 'Destaque no marketplace'}
+                        </div>
                       )}
                     </div>
-                    <div className="p-5">
-                      <div className="flex items-start gap-3">
+                    <div className="p-5 sm:p-6">
+                      <div className="flex items-start gap-4">
                         {pro.avatar_url ? (
-                          <img src={pro.avatar_url} alt={pro.full_name} className="w-12 h-12 rounded-full object-cover border-2 border-white shadow -mt-8 relative z-10 flex-shrink-0" />
+                          <img src={pro.avatar_url} alt={pro.full_name} className="relative z-10 -mt-11 h-16 w-16 flex-shrink-0 rounded-[1.35rem] border-4 border-white object-cover shadow-[0_14px_28px_rgba(15,23,42,0.18)]" />
                         ) : (
-                          <div className="w-12 h-12 rounded-full bg-indigo-500 border-2 border-white shadow -mt-8 relative z-10 flex-shrink-0 flex items-center justify-center text-white font-bold text-lg">
+                          <div className="relative z-10 -mt-11 flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-[1.35rem] border-4 border-white bg-indigo-500 text-lg font-bold text-white shadow-[0_14px_28px_rgba(15,23,42,0.18)]">
                             {pro.full_name[0]?.toUpperCase()}
                           </div>
                         )}
-                        <div className="flex-1 min-w-0">
-                          <h3 className="font-bold text-slate-900 truncate">{pro.full_name}</h3>
-                          <p className="text-indigo-600 text-sm font-medium truncate">{pro.profession}</p>
+                        <div className="min-w-0 flex-1 pt-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="line-clamp-2 text-lg font-bold leading-6 text-slate-900">{pro.full_name}</h3>
+                            {pro.plan === 'business' && (
+                              <span className="rounded-full bg-slate-900 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">
+                                Business
+                              </span>
+                            )}
+                            {pro.plan === 'pro' && (
+                              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-700">
+                                Pro
+                              </span>
+                            )}
+                          </div>
+                          <p className={`mt-1 text-sm font-medium ${
+                            pro.plan === 'business' ? 'text-slate-700' : 'text-indigo-600'
+                          }`}>
+                            {pro.profession}
+                          </p>
                         </div>
                       </div>
                       {pro.review_count > 0 && (
                         <div className="mt-3 flex items-center gap-1.5">
                           <div className="flex items-center gap-0.5">
-                            {[1,2,3,4,5].map(s => (
-                              <Star key={s} size={12} className={s <= Math.round(pro.rating) ? 'text-amber-400 fill-amber-400' : 'text-slate-200 fill-slate-200'} />
+                            {[1, 2, 3, 4, 5].map(star => (
+                              <Star key={star} size={12} className={star <= Math.round(pro.rating) ? 'fill-amber-400 text-amber-400' : 'fill-slate-200 text-slate-200'} />
                             ))}
                           </div>
                           <span className="text-xs text-slate-500">{Number(pro.rating).toFixed(1)} ({pro.review_count})</span>
                         </div>
                       )}
-                      {pro.bio && <p className="text-slate-500 text-sm mt-2 line-clamp-2">{pro.bio}</p>}
-                      <div className="mt-3 flex items-center justify-between">
+                      {pro.bio && <p className="mt-3 min-h-[2.75rem] line-clamp-2 text-sm leading-6 text-slate-500">{pro.bio}</p>}
+                      <div className="mt-4 flex items-center justify-between gap-3">
                         {(pro.city || pro.state) && (
-                          <span className="text-xs text-slate-400 flex items-center gap-1">
+                          <span className="flex items-center gap-1 text-xs text-slate-400">
                             <MapPin size={11} /> {[pro.city, pro.state].filter(Boolean).join(', ')}
                           </span>
                         )}
@@ -211,8 +297,14 @@ export default function Marketplace() {
                           <span className="text-sm font-bold text-indigo-600">A partir de R${pro.min_price}</span>
                         )}
                       </div>
-                      <div className="mt-3 pt-3 border-t border-slate-100">
-                        <span className="text-xs font-medium text-indigo-600 bg-indigo-50 px-2 py-1 rounded-full">Agendar agora →</span>
+                      <div className="mt-5 border-t border-slate-100 pt-4">
+                        <span className={`rounded-full px-2 py-1 text-xs font-medium ${
+                          pro.plan === 'business'
+                            ? 'bg-slate-100 text-slate-700'
+                            : 'bg-indigo-50 text-indigo-600'
+                        }`}>
+                          Ver perfil completo
+                        </span>
                       </div>
                     </div>
                   </Link>
@@ -225,3 +317,4 @@ export default function Marketplace() {
     </div>
   )
 }
+

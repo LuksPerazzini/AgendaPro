@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+﻿import { useEffect, useRef, useState } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../../contexts/AuthContext'
 import {
   LayoutDashboard, Calendar, Users, BarChart2, Settings, MessageCircle,
-  Star, Megaphone, Menu, X, Zap, Bell, ChevronRight, LogOut, Gift, Check, Clock
+  Star, Megaphone, Menu, X, Zap, Bell, ChevronRight, LogOut, Gift, Check, Clock, CreditCard, Loader2, AlertCircle, Shield
 } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { addDays, format } from 'date-fns'
@@ -18,16 +18,17 @@ type Notification = {
   services: { name: string } | null
 }
 
-const navItems = [
-  { path: '/dashboard', icon: <LayoutDashboard size={18} />, label: 'Visao Geral', exact: true },
+const baseNavItems = [
+  { path: '/dashboard', icon: <LayoutDashboard size={18} />, label: 'Visão Geral', exact: true },
   { path: '/dashboard/agenda', icon: <Calendar size={18} />, label: 'Agenda' },
   { path: '/dashboard/clientes', icon: <Users size={18} />, label: 'Clientes' },
-  { path: '/dashboard/relatorios', icon: <BarChart2 size={18} />, label: 'Relatorios' },
+  { path: '/dashboard/relatorios', icon: <BarChart2 size={18} />, label: 'Relatórios' },
   { path: '/dashboard/marketing', icon: <Megaphone size={18} />, label: 'Marketing' },
-  { path: '/dashboard/avaliacoes', icon: <Star size={18} />, label: 'Avaliacoes' },
+  { path: '/dashboard/avaliacoes', icon: <Star size={18} />, label: 'Avaliações' },
   { path: '/dashboard/whatsapp', icon: <MessageCircle size={18} />, label: 'WhatsApp' },
-  { path: '/dashboard/afiliados', icon: <Gift size={18} />, label: 'Indicacoes' },
-  { path: '/dashboard/configuracoes', icon: <Settings size={18} />, label: 'Configuracoes' },
+  { path: '/dashboard/afiliados', icon: <Gift size={18} />, label: 'Indicações' },
+  { path: '/dashboard/servicos', icon: <CreditCard size={18} />, label: 'Serviços' },
+  { path: '/dashboard/configuracoes', icon: <Settings size={18} />, label: 'Configurações', exact: true },
 ]
 
 export default function DashboardLayout() {
@@ -35,21 +36,27 @@ export default function DashboardLayout() {
   const [notifOpen, setNotifOpen] = useState(false)
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [unreadCount, setUnreadCount] = useState(0)
+  const [notifLoading, setNotifLoading] = useState(true)
+  const [notifActionId, setNotifActionId] = useState<string | null>(null)
+  const [notifError, setNotifError] = useState('')
   const location = useLocation()
   const navigate = useNavigate()
-  const { profile, signOut, user } = useAuth()
+  const { profile, signOut, user, isAdmin } = useAuth()
   const notifRef = useRef<HTMLDivElement>(null)
   const todayKey = format(new Date(), 'yyyy-MM-dd')
   const tomorrowKey = format(addDays(new Date(), 1), 'yyyy-MM-dd')
+  const navItems = isAdmin
+    ? [...baseNavItems, { path: '/dashboard/contas', icon: <Shield size={18} />, label: 'Contas' }]
+    : baseNavItems
 
   const handleLogout = async () => {
     await signOut()
     navigate('/login')
   }
 
-  const displayName = profile?.full_name ?? 'Usuario'
-  const displayPlan = profile?.plan === 'pro' ? 'Plano PRO' : profile?.plan === 'business' ? 'Business' : 'Plano Gratuito'
-  const planColor = profile?.plan === 'free' ? 'text-slate-400' : 'text-amber-400'
+  const displayName = profile?.full_name ?? 'Usuário'
+  const displayPlan = isAdmin ? 'Administrador' : profile?.plan === 'pro' ? 'Plano PRO' : profile?.plan === 'business' ? 'Business' : 'Plano Gratuito'
+  const planColor = isAdmin ? 'text-rose-300' : profile?.plan === 'free' ? 'text-slate-400' : 'text-amber-400'
 
   const isActive = (path: string, exact?: boolean) => {
     if (exact) return location.pathname === path
@@ -72,7 +79,10 @@ export default function DashboardLayout() {
     let ignore = false
 
     const load = async () => {
-      const { data } = await supabase
+      setNotifLoading(true)
+      setNotifError('')
+
+      const { data, error } = await supabase
         .from('appointments')
         .select('id, client_name, time, date, status, services(name)')
         .eq('profile_id', user.id)
@@ -82,11 +92,18 @@ export default function DashboardLayout() {
         .order('time')
         .limit(10)
 
-      if (ignore || !data) return
+      if (ignore) return
+
+      if (error) {
+        setNotifError('Não foi possível carregar as notificações.')
+        setNotifLoading(false)
+        return
+      }
 
       const nextNotifications = data as unknown as Notification[]
       setNotifications(nextNotifications)
       setUnreadCount(nextNotifications.filter(notification => notification.status === 'pending').length)
+      setNotifLoading(false)
     }
 
     void load()
@@ -108,19 +125,28 @@ export default function DashboardLayout() {
     }
   }, [todayKey, user])
 
-  const markAllRead = () => {
-    setUnreadCount(0)
-  }
-
   const confirmNotif = async (id: string) => {
-    await supabase.from('appointments').update({ status: 'confirmed' }).eq('id', id)
-    setNotifications(prev => prev.map(notification => notification.id === id ? { ...notification, status: 'confirmed' } : notification))
+    setNotifActionId(id)
+    setNotifError('')
+
+    const previousNotifications = notifications
+    setNotifications(current => current.map(notification => notification.id === id ? { ...notification, status: 'confirmed' } : notification))
     setUnreadCount(prev => Math.max(0, prev - 1))
+
+    const { error } = await supabase.from('appointments').update({ status: 'confirmed' }).eq('id', id)
+
+    setNotifActionId(null)
+
+    if (error) {
+      setNotifications(previousNotifications)
+      setUnreadCount(previousNotifications.filter(notification => notification.status === 'pending').length)
+      setNotifError('Não foi possível confirmar esse agendamento agora.')
+    }
   }
 
   const formatNotifDate = (date: string) => {
     if (date === todayKey) return 'Hoje'
-    if (date === tomorrowKey) return 'Amanha'
+    if (date === tomorrowKey) return 'Amanhã'
     return format(new Date(date + 'T12:00:00'), "d 'de' MMM", { locale: ptBR })
   }
 
@@ -202,10 +228,7 @@ export default function DashboardLayout() {
           <div className="ml-auto flex items-center gap-3">
             <div className="relative" ref={notifRef}>
               <button
-                onClick={() => {
-                  setNotifOpen(!notifOpen)
-                  if (!notifOpen) markAllRead()
-                }}
+                onClick={() => setNotifOpen(open => !open)}
                 className="relative rounded-lg p-2 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700"
               >
                 <Bell size={18} />
@@ -219,17 +242,27 @@ export default function DashboardLayout() {
               {notifOpen && (
                 <div className="absolute right-0 z-50 mt-2 w-80 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl">
                   <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-                    <h3 className="text-sm font-bold text-slate-900">Notificacoes</h3>
+                    <h3 className="text-sm font-bold text-slate-900">Notificações</h3>
                     <button onClick={() => setNotifOpen(false)} className="rounded-lg p-1 hover:bg-slate-100">
                       <X size={14} className="text-slate-400" />
                     </button>
                   </div>
 
+                  {notifError && (
+                    <div className="mx-4 mt-4 flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                      <AlertCircle size={14} /> {notifError}
+                    </div>
+                  )}
+
                   <div className="max-h-96 overflow-y-auto">
-                    {notifications.length === 0 ? (
+                    {notifLoading ? (
+                      <div className="flex items-center justify-center p-8 text-slate-400">
+                        <Loader2 size={24} className="animate-spin" />
+                      </div>
+                    ) : notifications.length === 0 ? (
                       <div className="p-8 text-center text-slate-400">
                         <Bell size={32} className="mx-auto mb-2 text-slate-200" />
-                        <p className="text-sm font-medium">Nenhuma notificacao</p>
+                        <p className="text-sm font-medium">Nenhuma notificação</p>
                         <p className="mt-1 text-xs">Novos agendamentos aparecem aqui</p>
                       </div>
                     ) : notifications.map(notification => (
@@ -241,19 +274,21 @@ export default function DashboardLayout() {
                           <div className="min-w-0 flex-1">
                             <p className="truncate text-sm font-semibold text-slate-900">{notification.client_name}</p>
                             <p className="text-xs text-slate-500">
-                              {notification.services?.name ?? 'Servico'} · {formatNotifDate(notification.date)} as {notification.time.slice(0, 5)}
+                              {notification.services?.name ?? 'Serviço'} · {formatNotifDate(notification.date)} às {notification.time.slice(0, 5)}
                             </p>
                             {notification.status === 'pending' && (
                               <button
                                 onClick={() => void confirmNotif(notification.id)}
-                                className="mt-1.5 rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-indigo-700"
+                                disabled={notifActionId === notification.id}
+                                className="mt-1.5 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-indigo-700 disabled:opacity-60"
                               >
+                                {notifActionId === notification.id ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
                                 Confirmar agendamento
                               </button>
                             )}
                           </div>
                           <span className={`flex-shrink-0 rounded-full px-1.5 py-0.5 text-xs font-medium ${notification.status === 'pending' ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}`}>
-                            {notification.status === 'pending' ? 'Novo' : 'Confirmado'}
+                            {notification.status === 'pending' ? 'Pendente' : 'Confirmado'}
                           </span>
                         </div>
                       </div>
@@ -269,7 +304,7 @@ export default function DashboardLayout() {
               )}
             </div>
 
-            {profile?.slug && (
+            {!isAdmin && profile?.slug && (
               <Link
                 to={`/professional/${profile.slug}`}
                 className="rounded-lg border border-indigo-200 px-3 py-1.5 text-sm font-medium text-indigo-600 transition-colors hover:bg-indigo-50"

@@ -11,16 +11,29 @@ import {
   Users,
   X,
 } from 'lucide-react'
+import WhatsAppComposerModal from '../../components/WhatsAppComposerModal'
 import { supabase } from '../../lib/supabase'
 import { useAuth } from '../../contexts/AuthContext'
+import {
+  defaultWhatsAppTemplates,
+  hasReachablePhone,
+  normalizeWhatsAppTemplates,
+  normalizePhoneDigits,
+  type MessageTemplates,
+} from '../../lib/whatsapp'
+
+type ClientMatchField = 'phone' | 'email' | 'name'
 
 type Client = {
+  id: string
   client_name: string
   client_phone: string
   client_email: string | null
   total_visits: number
   total_spent: number
   last_visit: string
+  matchField: ClientMatchField
+  matchValue: string
 }
 
 type AppointmentRow = {
@@ -36,6 +49,10 @@ type EditClientModalProps = {
   profileId: string
   onClose: () => void
   onSaved: () => void
+}
+
+type WhatsAppProfileRow = {
+  whatsapp_templates?: Partial<MessageTemplates> | null
 }
 
 function EditClientModal({ client, profileId, onClose, onSaved }: EditClientModalProps) {
@@ -59,7 +76,7 @@ function EditClientModal({ client, profileId, onClose, onSaved }: EditClientModa
     const nextPhone = form.client_phone.trim() || 'N/A'
     const nextEmail = form.client_email.trim() || null
 
-    const { error: updateError } = await supabase
+    let query = supabase
       .from('appointments')
       .update({
         client_name: form.client_name.trim(),
@@ -67,12 +84,21 @@ function EditClientModal({ client, profileId, onClose, onSaved }: EditClientModa
         client_email: nextEmail,
       })
       .eq('profile_id', profileId)
-      .eq('client_phone', client.client_phone)
+
+    if (client.matchField === 'phone') {
+      query = query.eq('client_phone', client.matchValue)
+    } else if (client.matchField === 'email') {
+      query = query.eq('client_email', client.matchValue)
+    } else {
+      query = query.eq('client_name', client.matchValue).eq('client_phone', 'N/A')
+    }
+
+    const { error: updateError } = await query
 
     setSaving(false)
 
     if (updateError) {
-      setError(updateError.message || 'Nao foi possivel atualizar o cliente.')
+      setError(updateError.message || 'Não foi possível atualizar o cliente.')
       return
     }
 
@@ -86,7 +112,7 @@ function EditClientModal({ client, profileId, onClose, onSaved }: EditClientModa
         <div className="flex items-center justify-between border-b border-slate-100 p-5">
           <div>
             <h2 className="text-lg font-bold text-slate-900">Editar cliente</h2>
-            <p className="text-sm text-slate-500">Atualize os dados salvos nos agendamentos</p>
+            <p className="text-sm text-slate-500">Atualize os dados salvos nos agendamentos relacionados</p>
           </div>
           <button onClick={onClose} className="rounded-lg p-2 transition-colors hover:bg-slate-100">
             <X size={18} className="text-slate-500" />
@@ -137,12 +163,12 @@ function EditClientModal({ client, profileId, onClose, onSaved }: EditClientModa
             Cancelar
           </button>
           <button
-            onClick={handleSave}
+            onClick={() => void handleSave()}
             disabled={saving}
             className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-indigo-600 py-2.5 font-bold text-white transition-colors hover:bg-indigo-700 disabled:opacity-50"
           >
             {saving ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
-            {saving ? 'Salvando...' : 'Salvar alteracoes'}
+            {saving ? 'Salvando...' : 'Salvar alterações'}
           </button>
         </div>
       </div>
@@ -154,25 +180,36 @@ export default function DashboardClientes() {
   const { profile } = useAuth()
   const profileId = profile?.id ?? null
   const [clients, setClients] = useState<Client[]>([])
+  const [templates, setTemplates] = useState<MessageTemplates>(defaultWhatsAppTemplates)
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [editingClient, setEditingClient] = useState<Client | null>(null)
+  const [selectedClient, setSelectedClient] = useState<Client | null>(null)
+  const [errorMessage, setErrorMessage] = useState('')
 
   const buildClients = (rows: AppointmentRow[]) => {
     const map = new Map<string, Client>()
 
     for (const row of rows) {
-      const key = row.client_phone
+      const phoneDigits = normalizePhoneDigits(row.client_phone)
+      const emailKey = row.client_email?.trim().toLowerCase() ?? ''
+      const nameKey = row.client_name.trim().toLowerCase()
+      const matchField: ClientMatchField = phoneDigits.length >= 10 ? 'phone' : emailKey ? 'email' : 'name'
+      const matchValue = matchField === 'phone' ? row.client_phone : matchField === 'email' ? emailKey : row.client_name
+      const key = `${matchField}:${matchField === 'phone' ? phoneDigits : matchValue.toLowerCase()}`
       const existing = map.get(key)
 
       if (!existing) {
         map.set(key, {
+          id: key,
           client_name: row.client_name,
           client_phone: row.client_phone,
           client_email: row.client_email,
           total_visits: 1,
           total_spent: row.services?.[0]?.price ?? 0,
           last_visit: row.date,
+          matchField,
+          matchValue,
         })
         continue
       }
@@ -183,10 +220,23 @@ export default function DashboardClientes() {
       if (row.date > existing.last_visit) {
         existing.last_visit = row.date
         existing.client_name = row.client_name
+        existing.client_phone = row.client_phone
       }
 
       if (!existing.client_email && row.client_email) {
         existing.client_email = row.client_email
+      }
+
+      if (!hasReachablePhone(existing.client_phone) && hasReachablePhone(row.client_phone)) {
+        existing.client_phone = row.client_phone
+      }
+
+      if (matchField === 'email' && !existing.client_email) {
+        existing.client_email = row.client_email
+      }
+
+      if (matchField === 'name' && nameKey && existing.matchField === 'name') {
+        existing.matchValue = row.client_name
       }
     }
 
@@ -200,61 +250,70 @@ export default function DashboardClientes() {
       return
     }
 
-    const { data } = await supabase
-      .from('appointments')
-      .select('client_name, client_phone, client_email, date, services(price)')
-      .eq('profile_id', profileId)
-      .neq('status', 'cancelled')
-      .order('date', { ascending: false })
+    setLoading(true)
+    setErrorMessage('')
 
-    setClients(buildClients((data as AppointmentRow[] | null) ?? []))
-    setLoading(false)
-  }, [profileId])
-
-  useEffect(() => {
-    let ignore = false
-
-    const syncClients = async () => {
-      if (!profileId) {
-        if (!ignore) {
-          setClients([])
-          setLoading(false)
-        }
-        return
-      }
-
-      setLoading(true)
-
-      const { data } = await supabase
+    const [{ data, error }, { data: profileData }] = await Promise.all([
+      supabase
         .from('appointments')
         .select('client_name, client_phone, client_email, date, services(price)')
         .eq('profile_id', profileId)
         .neq('status', 'cancelled')
-        .order('date', { ascending: false })
+        .order('date', { ascending: false }),
+      supabase
+        .from('profiles')
+        .select('whatsapp_templates')
+        .eq('id', profileId)
+        .maybeSingle(),
+    ])
 
-      if (ignore) return
-
-      setClients(buildClients((data as AppointmentRow[] | null) ?? []))
+    if (error) {
+      setErrorMessage('Não foi possível carregar a lista de clientes agora.')
+      setClients([])
       setLoading(false)
+      return
     }
 
-    void syncClients()
-
-    return () => {
-      ignore = true
-    }
+    setClients(buildClients((data as AppointmentRow[] | null) ?? []))
+    setTemplates(normalizeWhatsAppTemplates((profileData as WhatsAppProfileRow | null)?.whatsapp_templates))
+    setLoading(false)
   }, [profileId])
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void loadClients()
+    }, 0)
+
+    return () => window.clearTimeout(timeout)
+  }, [loadClients])
 
   const filtered = useMemo(() => clients.filter(client =>
     client.client_name.toLowerCase().includes(search.toLowerCase()) ||
-    client.client_phone.includes(search)
+    client.client_phone.includes(search) ||
+    (client.client_email ?? '').toLowerCase().includes(search.toLowerCase())
   ), [clients, search])
 
   const totalSpent = clients.reduce((sum, client) => sum + client.total_spent, 0)
   const avgSpent = clients.length > 0 ? Math.round(totalSpent / clients.length) : 0
+  const currentMonthKey = new Date().toISOString().slice(0, 7)
 
   return (
     <div className="p-4 sm:p-6 lg:p-8">
+      {selectedClient && (
+        <WhatsAppComposerModal
+          title="Mensagem para cliente"
+          recipientName={selectedClient.client_name}
+          recipientPhone={selectedClient.client_phone}
+          templates={templates}
+          templateKeys={['confirmacao', 'lembrete24h', 'lembrete1h', 'cancelamento', 'avaliacaoPos']}
+          variables={{
+            nome: selectedClient.client_name,
+            servico: 'atendimento',
+          }}
+          onClose={() => setSelectedClient(null)}
+        />
+      )}
+
       {editingClient && profileId && (
         <EditClientModal
           client={editingClient}
@@ -271,12 +330,18 @@ export default function DashboardClientes() {
         </div>
       </div>
 
+      {errorMessage && (
+        <div className="mb-4 flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+          <AlertCircle size={16} /> {errorMessage}
+        </div>
+      )}
+
       <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
         {[
           { label: 'Total de clientes', value: clients.length, icon: '👥' },
-          { label: 'Ativos este mes', value: clients.filter(client => client.last_visit >= new Date().toISOString().slice(0, 7)).length, icon: '✅' },
+          { label: 'Ativos este mês', value: clients.filter(client => client.last_visit.slice(0, 7) === currentMonthKey).length, icon: '✅' },
           { label: 'Receita total', value: `R$${totalSpent.toLocaleString('pt-BR')}`, icon: '💰' },
-          { label: 'Media por cliente', value: `R$${avgSpent}`, icon: '📊' },
+          { label: 'Média por cliente', value: `R$${avgSpent.toLocaleString('pt-BR')}`, icon: '📊' },
         ].map(stat => (
           <div key={stat.label} className="rounded-2xl border border-slate-100 bg-white p-4">
             <div className="mb-1 text-2xl">{stat.icon}</div>
@@ -292,7 +357,7 @@ export default function DashboardClientes() {
             <Search size={16} className="text-slate-400" />
             <input
               type="text"
-              placeholder="Buscar por nome ou telefone..."
+              placeholder="Buscar por nome, telefone ou e-mail..."
               value={search}
               onChange={event => setSearch(event.target.value)}
               className="flex-1 bg-transparent text-sm text-slate-700 outline-none placeholder:text-slate-400"
@@ -312,8 +377,8 @@ export default function DashboardClientes() {
           </div>
         ) : (
           <div className="divide-y divide-slate-50">
-            {filtered.map((client, index) => (
-              <div key={`${client.client_phone}-${index}`} className="p-4 transition-colors hover:bg-slate-50">
+            {filtered.map(client => (
+              <div key={client.id} className="p-4 transition-colors hover:bg-slate-50">
                 <div className="flex items-center gap-4">
                   <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100">
                     <span className="font-bold text-indigo-600">{client.client_name[0]?.toUpperCase()}</span>
@@ -331,7 +396,7 @@ export default function DashboardClientes() {
                       <div className="text-xs text-slate-400">visitas</div>
                     </div>
                     <div className="text-center">
-                      <div className="font-semibold text-emerald-600">R${client.total_spent}</div>
+                      <div className="font-semibold text-emerald-600">R${client.total_spent.toLocaleString('pt-BR')}</div>
                       <div className="text-xs text-slate-400">gasto total</div>
                     </div>
                     <div className="text-center">
@@ -340,17 +405,29 @@ export default function DashboardClientes() {
                     </div>
                   </div>
                   <div className="flex flex-shrink-0 items-center gap-2">
-                    <a
-                      href={`https://wa.me/55${client.client_phone.replace(/\D/g, '')}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="rounded-lg bg-green-100 p-2 text-green-600 transition-colors hover:bg-green-200"
-                    >
-                      <MessageCircle size={14} />
-                    </a>
+                    {hasReachablePhone(client.client_phone) ? (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedClient(client)}
+                        className="rounded-lg bg-green-100 p-2 text-green-600 transition-colors hover:bg-green-200"
+                        title="Abrir mensagem pronta"
+                      >
+                        <MessageCircle size={14} />
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled
+                        className="cursor-not-allowed rounded-lg bg-slate-100 p-2 text-slate-300"
+                        title="Cliente sem WhatsApp valido"
+                      >
+                        <MessageCircle size={14} />
+                      </button>
+                    )}
                     <button
                       onClick={() => setEditingClient(client)}
                       className="rounded-lg bg-indigo-100 p-2 text-indigo-600 transition-colors hover:bg-indigo-200"
+                      title="Editar cliente"
                     >
                       <Pencil size={14} />
                     </button>
@@ -364,3 +441,4 @@ export default function DashboardClientes() {
     </div>
   )
 }
+

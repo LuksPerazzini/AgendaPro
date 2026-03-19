@@ -13,6 +13,8 @@ type Profile = {
   rating: number
   review_count: number
   phone: string | null
+  referred_by?: string | null
+  role?: 'user' | 'admin'
 }
 
 type AuthContextType = {
@@ -24,11 +26,15 @@ type AuthContextType = {
   signUp: (email: string, password: string, fullName: string, profession: string, refSlug?: string) => Promise<{ error: string | null }>
   signOut: () => Promise<void>
   refreshProfile: () => Promise<void>
+  isAdmin: boolean
 }
+
+type ProfileRow = Omit<Profile, 'role'> & { role?: 'user' | 'admin' }
 
 const AuthContext = createContext<AuthContextType | null>(null)
 
-const profileSelect = 'id, full_name, profession, plan, avatar_url, slug, rating, review_count, phone'
+const profileSelectWithRole = 'id, full_name, profession, plan, avatar_url, slug, rating, review_count, phone, referred_by, role'
+const profileSelectLegacy = 'id, full_name, profession, plan, avatar_url, slug, rating, review_count, phone, referred_by'
 
 const slugify = (value: string) =>
   value
@@ -54,6 +60,37 @@ const buildProfileSeed = (authUser: User) => {
   }
 }
 
+function getUserRole(authUser: User, row?: { role?: 'user' | 'admin' } | null) {
+  const appRole = authUser.app_metadata?.role
+  return row?.role ?? (appRole === 'admin' ? 'admin' : 'user')
+}
+
+function normalizeProfile(authUser: User, row: ProfileRow) {
+  return {
+    ...row,
+    role: getUserRole(authUser, row),
+  } as Profile
+}
+
+async function selectProfile(authUser: User) {
+  const withRole = await supabase
+    .from('profiles')
+    .select(profileSelectWithRole)
+    .eq('id', authUser.id)
+    .maybeSingle()
+
+  if (!withRole.error) return { data: withRole.data as ProfileRow | null, usedLegacy: false }
+
+  const legacy = await supabase
+    .from('profiles')
+    .select(profileSelectLegacy)
+    .eq('id', authUser.id)
+    .maybeSingle()
+
+  if (legacy.error) return { data: null, usedLegacy: true }
+  return { data: legacy.data as ProfileRow | null, usedLegacy: true }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [session, setSession] = useState<Session | null>(null)
@@ -62,37 +99,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const ensureProfile = useCallback(async (authUser: User) => {
     const seed = buildProfileSeed(authUser)
-    const { data, error } = await supabase
-      .from('profiles')
-      .upsert(seed, { onConflict: 'id' })
-      .select(profileSelect)
-      .single()
+    await supabase.from('profiles').upsert(seed, { onConflict: 'id' })
 
-    if (error) {
+    const { data } = await selectProfile(authUser)
+    if (!data) {
       setProfile(null)
       return null
     }
 
-    const nextProfile = data as Profile
+    const nextProfile = normalizeProfile(authUser, data)
     setProfile(nextProfile)
     return nextProfile
   }, [])
 
   const fetchProfile = useCallback(async (authUser: User) => {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select(profileSelect)
-      .eq('id', authUser.id)
-      .maybeSingle()
+    const { data } = await selectProfile(authUser)
 
     if (data) {
-      setProfile(data as Profile)
-      return data as Profile
-    }
-
-    if (error) {
-      setProfile(null)
-      return null
+      const nextProfile = normalizeProfile(authUser, data)
+      setProfile(nextProfile)
+      return nextProfile
     }
 
     return ensureProfile(authUser)
@@ -141,20 +167,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
-      options: { data: { full_name: fullName, profession } }
+      options: { data: { full_name: fullName, profession } },
     })
 
     if (error) return { error: error.message }
 
     if (data.user) {
-      const { error: profileError } = await supabase.from('profiles').upsert({
-        id: data.user.id,
-        full_name: fullName,
-        profession,
-        plan: 'free',
-        slug,
-        ...(refSlug ? { referred_by: refSlug } : {}),
-      }, { onConflict: 'id' })
+      const { error: profileError } = await supabase.from('profiles').upsert(
+        {
+          id: data.user.id,
+          full_name: fullName,
+          profession,
+          plan: 'free',
+          slug,
+          ...(refSlug ? { referred_by: refSlug } : {}),
+        },
+        { onConflict: 'id' }
+      )
 
       if (profileError) return { error: profileError.message }
     }
@@ -166,8 +195,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await supabase.auth.signOut()
   }
 
+  const isAdmin = profile?.role === 'admin' || user?.app_metadata?.role === 'admin'
+
   return (
-    <AuthContext.Provider value={{ user, session, profile, loading, signIn, signUp, signOut, refreshProfile }}>
+    <AuthContext.Provider value={{ user, session, profile, loading, signIn, signUp, signOut, refreshProfile, isAdmin }}>
       {children}
     </AuthContext.Provider>
   )
